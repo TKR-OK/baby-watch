@@ -253,7 +253,10 @@ function renderSelector(){
 async function renderCamera(){
   $app.innerHTML = `
     <div class="topbar">
-      <div class="brand"><span class="dot"></span> カメラモード</div>
+      <div style="display:flex; align-items:center; gap:10px;">
+        <a href="?" class="theme-toggle" style="text-decoration:none;">← 戻る</a>
+        <div class="brand"><span class="dot"></span> カメラモード</div>
+      </div>
       <div style="display:flex; align-items:center; gap:8px;">
         ${themeToggleHtml()}
         <div id="status" class="status-pill"><span class="dot"></span>準備中…</div>
@@ -269,6 +272,7 @@ async function renderCamera(){
     <div class="center-col" style="flex:none; padding:20px;">
       <div class="room-code-label">ビューア側でこのIDを入力してください</div>
       <div id="roomCode" class="room-code">------</div>
+      <div class="hint"><a href="#" id="resetRoomId" style="color:inherit;">IDを再発行する</a>（別居先で新しいペアリングにしたい時のみ）</div>
       <div class="hint" id="wakeHint">画面スリープ防止: 確認中…</div>
     </div>
     <audio id="remoteTalkAudio" autoplay playsinline></audio>
@@ -323,10 +327,28 @@ async function renderCamera(){
   }
   localVideoEl.srcObject = localStream;
 
-  // --- PeerJS 初期化（ルームIDをカメラ側が発行） ---
-  const roomId = makeRoomCode();
+  // --- PeerJS 初期化（ルームIDは端末に保存し、次回以降も同じIDを再利用） ---
+  const CAMERA_ROOM_KEY = 'babywatch-camera-room-id';
+  function getOrCreateRoomId(){
+    try {
+      const saved = localStorage.getItem(CAMERA_ROOM_KEY);
+      if (saved) return saved;
+      const fresh = makeRoomCode();
+      localStorage.setItem(CAMERA_ROOM_KEY, fresh);
+      return fresh;
+    } catch(e){
+      return makeRoomCode(); // localStorageが使えない環境ではその場限りのIDにフォールバック
+    }
+  }
+  const roomId = getOrCreateRoomId();
   roomCodeEl.textContent = roomId;
   setStatus('待機中（接続待ち）', null);
+
+  document.getElementById('resetRoomId')?.addEventListener('click', (e) => {
+    e.preventDefault();
+    try { localStorage.removeItem(CAMERA_ROOM_KEY); } catch(err){}
+    location.reload();
+  });
 
   const peer = new Peer('bw-' + roomId, {
     // PeerJS公式クラウドのデフォルトシグナリングサーバを使用
@@ -375,7 +397,10 @@ async function renderCamera(){
 async function renderViewer(){
   $app.innerHTML = `
     <div class="topbar">
-      <div class="brand"><span class="dot"></span> ビューアモード</div>
+      <div style="display:flex; align-items:center; gap:10px;">
+        <a href="?" class="theme-toggle" style="text-decoration:none;">← 戻る</a>
+        <div class="brand"><span class="dot"></span> ビューアモード</div>
+      </div>
       <div style="display:flex; align-items:center; gap:8px;">
         ${themeToggleHtml()}
         <div id="status" class="status-pill"><span class="dot"></span>未接続</div>
@@ -387,6 +412,7 @@ async function renderViewer(){
       <input id="roomInput" type="text" maxlength="6" placeholder="ABC123" autocapitalize="characters" autocomplete="off">
       <button id="connectBtn" class="block" style="max-width:280px;">視聴開始</button>
       <div class="hint">※iOS Safariの制限により、映像・音声はこのボタン操作後に再生されます</div>
+      <div class="hint"><a href="#" id="forgetRoomId" style="color:inherit;">別のカメラに接続する（保存したIDを削除）</a></div>
     </div>
 
     <div id="watchScreen" class="hidden" style="display:flex; flex-direction:column; flex:1;">
@@ -400,6 +426,7 @@ async function renderViewer(){
       <div class="controls-bar">
         <button id="muteBtn" class="icon-btn" title="ミュート切替">🔊</button>
         <button id="talkBtn" class="icon-btn talk" title="押している間だけ話せます">🎙️</button>
+        <button id="hangupBtn" class="icon-btn" title="切断してルームID入力画面に戻る" style="background:var(--danger); color:#fff; border-color:var(--danger);">📴</button>
       </div>
     </div>
   `;
@@ -413,6 +440,7 @@ async function renderViewer(){
   const remoteVideoEl = document.getElementById('remoteVideo');
   const muteBtn = document.getElementById('muteBtn');
   const talkBtn = document.getElementById('talkBtn');
+  const hangupBtn = document.getElementById('hangupBtn');
 
   function setStatus(text, cls){
     statusEl.className = 'status-pill' + (cls ? ' ' + cls : '');
@@ -426,10 +454,12 @@ async function renderViewer(){
   let peer = null;
   let talkStream = null; // プッシュトゥトーク用マイクストリーム（都度取得）
   let activeTalkCall = null;
+  let activeVideoCall = null; // 切断ボタンで閉じるため参照を保持
 
-  connectBtn.addEventListener('click', async () => {
-    const code = roomInput.value.trim();
-    if (code.length < 4){
+  const LAST_ROOM_KEY = 'babywatch-last-room-id';
+
+  async function connectToRoom(code){
+    if (!code || code.length < 4){
       showToast('IDを入力してください');
       return;
     }
@@ -451,12 +481,16 @@ async function renderViewer(){
     // カメラ側からの映像callを受信専用で応答する
     peer.on('call', (call) => {
       if (call.metadata && call.metadata.kind === 'talk') return; // 自分から発信したtalk callは無視
+      activeVideoCall = call;
       call.answer(); // ストリームを渡さない＝受信専用
       call.on('stream', (remoteStream) => {
         remoteVideoEl.srcObject = remoteStream;
         entryScreen.classList.add('hidden');
         watchScreen.classList.remove('hidden');
         setStatus('接続中（映像受信中）', 'live');
+
+        // 接続成功したIDは端末に保存し、次回は自動接続する
+        try { localStorage.setItem(LAST_ROOM_KEY, code); } catch(e){}
 
         // 音声トラック付きのため、自動再生ブロック対策として
         // まずミュート状態で明示的にplay()し、失敗した場合のみ手動再生を促す
@@ -493,6 +527,25 @@ async function renderViewer(){
         }
       }, 30000);
     });
+  }
+
+  connectBtn.addEventListener('click', () => connectToRoom(roomInput.value.trim()));
+
+  // 前回接続に成功したIDが端末に保存されていれば自動入力＋自動接続する
+  (function tryAutoConnect(){
+    let saved = null;
+    try { saved = localStorage.getItem(LAST_ROOM_KEY); } catch(e){}
+    if (saved){
+      roomInput.value = saved;
+      connectToRoom(saved);
+    }
+  })();
+
+  document.getElementById('forgetRoomId')?.addEventListener('click', (e) => {
+    e.preventDefault();
+    try { localStorage.removeItem(LAST_ROOM_KEY); } catch(err){}
+    roomInput.value = '';
+    showToast('保存していたIDを削除しました');
   });
 
   // --- ミュート切替（映像は音声トラック自動再生ブロック回避のためミュート状態で開始） ---
@@ -510,6 +563,20 @@ async function renderViewer(){
   document.querySelector('.stage')?.addEventListener('click', () => {
     if (remoteVideoEl.paused) remoteVideoEl.play().catch(() => {});
   });
+
+  // --- 切断（ルームID入力画面に戻る） ---
+  function disconnectAndReset(){
+    stopTalk();
+    if (activeVideoCall){ activeVideoCall.close(); activeVideoCall = null; }
+    if (peer){ peer.destroy(); peer = null; }
+    remoteVideoEl.srcObject = null;
+    watchScreen.classList.add('hidden');
+    entryScreen.classList.remove('hidden');
+    setStatus('未接続', null);
+    connectBtn.disabled = false;
+    connectBtn.textContent = '視聴開始';
+  }
+  hangupBtn.addEventListener('click', disconnectAndReset);
 
   // --- プッシュトゥトーク（押している間だけカメラ側スピーカーに音声送信） ---
   async function startTalk(){
