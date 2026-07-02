@@ -391,7 +391,7 @@ async function renderViewer(){
 
     <div id="watchScreen" class="hidden" style="display:flex; flex-direction:column; flex:1;">
       <div class="stage">
-        <video id="remoteVideo" autoplay playsinline></video>
+        <video id="remoteVideo" autoplay playsinline muted></video>
         <div class="viewfinder">
           <div class="vf-corner vf-tl"></div><div class="vf-corner vf-tr"></div>
           <div class="vf-corner vf-bl"></div><div class="vf-corner vf-br"></div>
@@ -457,6 +457,13 @@ async function renderViewer(){
         entryScreen.classList.add('hidden');
         watchScreen.classList.remove('hidden');
         setStatus('接続中（映像受信中）', 'live');
+
+        // 音声トラック付きのため、自動再生ブロック対策として
+        // まずミュート状態で明示的にplay()し、失敗した場合のみ手動再生を促す
+        remoteVideoEl.play().catch((err) => {
+          console.warn('自動再生に失敗', err);
+          showToast('映像が表示されない場合は画面をタップしてください', 4000);
+        });
       });
       call.on('close', () => {
         setStatus('切断されました', 'err');
@@ -488,13 +495,20 @@ async function renderViewer(){
     });
   });
 
-  // --- ミュート切替 ---
-  let muted = false;
+  // --- ミュート切替（映像は音声トラック自動再生ブロック回避のためミュート状態で開始） ---
+  let muted = true;
+  muteBtn.textContent = '🔇';
   muteBtn.addEventListener('click', () => {
     muted = !muted;
     remoteVideoEl.muted = muted;
+    if (!muted) remoteVideoEl.play().catch(() => {});
     muteBtn.textContent = muted ? '🔇' : '🔊';
     muteBtn.classList.toggle('active', !muted);
+  });
+
+  // 映像が黒いまま止まっている場合の保険: 画面タップで再生を試みる
+  document.querySelector('.stage')?.addEventListener('click', () => {
+    if (remoteVideoEl.paused) remoteVideoEl.play().catch(() => {});
   });
 
   // --- プッシュトゥトーク（押している間だけカメラ側スピーカーに音声送信） ---
